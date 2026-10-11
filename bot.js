@@ -103,6 +103,7 @@ const openTickets = new Map();
 const activeGames = new Set();
 const activePolls = new Map();
 const autoDeleteTimers = new Map();
+const activeSyncOperations = new Set();
 
 // ─── Interaction Router ──────────────────────────────────────────────────────
 client.on('error', (err) => {
@@ -113,7 +114,9 @@ client.on('error', (err) => {
 client.on('interactionCreate', async (interaction) => {
     try {
         if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'panel') {
+            if (interaction.commandName === 'sync') {
+                await handleSyncCommand(interaction);
+            } else if (interaction.commandName === 'panel') {
                 await handlePanelCommand(interaction);
             } else if (interaction.commandName === 'embed') {
                 await handleEmbedCommand(interaction);
@@ -1052,230 +1055,393 @@ async function handlePollEnd(interaction) {
     await interaction.update({ embeds: [embed], components: newComponents });
 }
 
+// ─── Slash Commands Definition ──────────────────────────────────────────────
+function getCommandsToDeploy() {
+    return [
+        {
+            name: 'sync',
+            description: 'Sync and re-deploy slash commands (Administrator only)',
+            defaultMemberPermissions: PermissionFlagsBits.Administrator,
+            options: [
+                {
+                    name: 'scope',
+                    description: 'Where to sync commands',
+                    type: ApplicationCommandOptionType.String,
+                    required: false,
+                    choices: [
+                        { name: 'This Server Only (Instant)', value: 'guild' },
+                        { name: 'All Joined Servers', value: 'all_guilds' },
+                        { name: 'Global Application Commands', value: 'global' }
+                    ]
+                }
+            ]
+        },
+        {
+            name: 'lock',
+            description: 'Lock the current channel',
+            defaultMemberPermissions: PermissionFlagsBits.ManageChannels
+        },
+        {
+            name: 'unlock',
+            description: 'Unlock the current channel',
+            defaultMemberPermissions: PermissionFlagsBits.ManageChannels
+        },
+        {
+            name: 'add',
+            description: 'Add a user to the current ticket',
+            options: [
+                {
+                    name: 'user',
+                    description: 'The user to add to the ticket',
+                    type: ApplicationCommandOptionType.User,
+                    required: true
+                }
+            ]
+        },
+        {
+            name: 'panel',
+            description: 'Send the Nachos Marketplace ticket panel',
+            defaultMemberPermissions: PermissionFlagsBits.ManageGuild
+        },
+        {
+            name: 'middleman-request',
+            description: 'Send the Middleman Request panel',
+            defaultMemberPermissions: PermissionFlagsBits.ManageGuild
+        },
+        {
+            name: 'close',
+            description: 'Close the current ticket channel',
+        },
+        {
+            name: 'restock_setup',
+            description: 'Set up a restock notification role panel',
+            defaultMemberPermissions: PermissionFlagsBits.ManageGuild,
+            options: [
+                {
+                    name: 'role',
+                    description: 'The role to give users',
+                    type: ApplicationCommandOptionType.Role,
+                    required: true
+                },
+                {
+                    name: 'emoji',
+                    description: 'The emoji to display on the message and button',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                }
+            ]
+        },
+        {
+            name: 'questioner',
+            description: 'Start a guessing game',
+            defaultMemberPermissions: PermissionFlagsBits.ManageGuild,
+            options: [
+                {
+                    name: 'question',
+                    description: 'The question people have to answer',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'answer',
+                    description: 'The correct answer',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'channel',
+                    description: 'The channel where the game will be posted',
+                    type: ApplicationCommandOptionType.Channel,
+                    channelTypes: [ChannelType.GuildText],
+                    required: true
+                },
+                {
+                    name: 'title',
+                    description: 'The title of the question/game',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'attachment',
+                    description: 'Optional image/file attachment',
+                    type: ApplicationCommandOptionType.Attachment,
+                    required: false
+                }
+            ]
+        },
+        {
+            name: 'poll',
+            description: 'Create a poll with up to 5 options',
+            defaultMemberPermissions: PermissionFlagsBits.ManageMessages,
+            options: [
+                {
+                    name: 'question',
+                    description: 'The question for the poll',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'option_1',
+                    description: 'First option',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'option_2',
+                    description: 'Second option',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'option_3',
+                    description: 'Third option',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'option_4',
+                    description: 'Fourth option',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'option_5',
+                    description: 'Fifth option',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'thumbnail',
+                    description: 'Optional image to show as a thumbnail',
+                    type: ApplicationCommandOptionType.Attachment,
+                    required: false
+                }
+            ]
+        },
+        {
+            name: 'setupautodelete',
+            description: 'Setup automatic recurring channel purge (deletes messages, does not delete channel)',
+            defaultMemberPermissions: PermissionFlagsBits.ManageChannels,
+            options: [
+                {
+                    name: 'interval',
+                    description: 'Interval in minutes to auto-delete messages',
+                    type: ApplicationCommandOptionType.Integer,
+                    required: true,
+                    minValue: 1
+                },
+                {
+                    name: 'logo',
+                    description: 'Optional image or GIF for the thumbnail',
+                    type: ApplicationCommandOptionType.Attachment,
+                    required: false
+                }
+            ]
+        },
+        {
+            name: 'embed',
+            description: 'Create a highly-customizable aesthetic embed message',
+            defaultMemberPermissions: PermissionFlagsBits.ManageMessages,
+            options: [
+                {
+                    name: 'message',
+                    description: 'The main text inside the embed (use \\n for line breaks)',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'color',
+                    description: 'Hex color code for the sidebar (e.g. #FF0000)',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                },
+                {
+                    name: 'title',
+                    description: 'Optional title text',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'footer',
+                    description: 'Optional footer text',
+                    type: ApplicationCommandOptionType.String,
+                    required: false
+                },
+                {
+                    name: 'attachment',
+                    description: 'Optional image attachment for the embed',
+                    type: ApplicationCommandOptionType.Attachment,
+                    required: false
+                }
+            ]
+        },
+        {
+            name: 'massdm',
+            description: 'DM all members with a specific role (Admin only)',
+            options: [
+                {
+                    name: 'role',
+                    description: 'The role whose members will receive the message',
+                    type: ApplicationCommandOptionType.Role,
+                    required: true
+                },
+                {
+                    name: 'message',
+                    description: 'The message to send to the members',
+                    type: ApplicationCommandOptionType.String,
+                    required: true
+                }
+            ]
+        }
+    ];
+}
+
+// ─── /sync Command Handler ───────────────────────────────────────────────────
+async function handleSyncCommand(interaction) {
+    // 1. Immediately acknowledge interaction to beat the 3s timeout
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // 2. Strict permission check: Administrator or Staff user
+    const isOwnerOrStaff = interaction.user.id === STAFF_USER_ID || interaction.user.id === "1421835488808931441";
+    const isAdmin = interaction.member?.permissions?.has(PermissionFlagsBits.Administrator);
+
+    if (!isAdmin && !isOwnerOrStaff) {
+        return interaction.editReply({
+            content: "❌ You need **Administrator** permissions to use `/sync`."
+        });
+    }
+
+    // 3. Concurrency lock to prevent spam / rate limits
+    const lockKey = interaction.guildId || interaction.user.id;
+    if (activeSyncOperations.has(lockKey)) {
+        return interaction.editReply({
+            content: "⏳ A command synchronization is already in progress. Please wait a moment."
+        });
+    }
+
+    activeSyncOperations.add(lockKey);
+
+    try {
+        const scope = interaction.options.getString('scope') || 'guild';
+        const commands = getCommandsToDeploy();
+        const results = [];
+
+        if (scope === 'guild') {
+            if (interaction.guild) {
+                await interaction.guild.commands.set(commands);
+                results.push(`✅ **This Server (${interaction.guild.name})**: Successfully synced **${commands.length}** slash commands instantly.`);
+            } else {
+                results.push(`⚠️ Command was executed outside of a server context.`);
+            }
+        } else if (scope === 'all_guilds') {
+            let successCount = 0;
+            let failCount = 0;
+            const guilds = await client.guilds.fetch();
+            for (const [id, oauthGuild] of guilds) {
+                try {
+                    const guild = await oauthGuild.fetch();
+                    await guild.commands.set(commands);
+                    successCount++;
+                } catch (e) {
+                    failCount++;
+                }
+            }
+            results.push(`✅ **All Joined Servers**: Synced to **${successCount}** server(s)${failCount > 0 ? ` (${failCount} failed)` : ''}.`);
+        } else if (scope === 'global') {
+            try {
+                await client.application.commands.set(commands);
+                results.push(`🌐 **Global Deployment**: Registered **${commands.length}** commands globally across all Discord servers.`);
+            } catch (err) {
+                results.push(`⚠️ **Global Deployment Notice**: ${err.message}`);
+            }
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle("⚡ Slash Commands Synchronized")
+            .setColor(COLORS.SUCCESS)
+            .setDescription(results.join("\n\n"))
+            .addFields(
+                { name: "📋 Registered Commands", value: `\`${commands.map(c => `/${c.name}`).join('`, `')}\``, inline: false },
+                { name: "🎯 Scope", value: `\`${scope}\``, inline: true },
+                { name: "👤 Executed By", value: `<@${interaction.user.id}>`, inline: true }
+            )
+            .setFooter({ text: "Nachos Marketplace • Command Sync Engine" })
+            .setTimestamp();
+
+        await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+        console.error("[Sync Error]:", err);
+        await interaction.editReply({
+            content: `❌ Failed to sync slash commands: \`${err.message || 'Unknown error'}\``
+        }).catch(() => {});
+    } finally {
+        activeSyncOperations.delete(lockKey);
+    }
+}
+
+// ─── Fallback Prefix Command (!sync) ─────────────────────────────────────────
+client.on('messageCreate', async (message) => {
+    try {
+        if (!message.guild || message.author.bot) return;
+
+        const content = message.content.trim().toLowerCase();
+        if (content === '!sync' || content === '.sync') {
+            const isOwnerOrStaff = message.author.id === STAFF_USER_ID || message.author.id === "1421835488808931441";
+            const isAdmin = message.member?.permissions?.has(PermissionFlagsBits.Administrator);
+
+            if (!isAdmin && !isOwnerOrStaff) {
+                return message.reply({ content: "❌ You need **Administrator** permissions to use `!sync`." }).catch(() => {});
+            }
+
+            const lockKey = message.guild.id;
+            if (activeSyncOperations.has(lockKey)) {
+                return message.reply({ content: "⏳ A command synchronization is already in progress. Please wait a moment." }).catch(() => {});
+            }
+
+            activeSyncOperations.add(lockKey);
+            const statusMsg = await message.reply("🔄 Synchronizing slash commands to this server...").catch(() => null);
+
+            try {
+                const commands = getCommandsToDeploy();
+                await message.guild.commands.set(commands);
+                await client.application.commands.set(commands).catch(() => {});
+
+                const embed = new EmbedBuilder()
+                    .setTitle("⚡ Slash Commands Synchronized")
+                    .setColor(COLORS.SUCCESS)
+                    .setDescription(`✅ Successfully deployed **${commands.length}** slash commands to **${message.guild.name}**!\nSlash commands should now be available in this server.`)
+                    .addFields({
+                        name: "Registered Commands",
+                        value: `\`${commands.map(c => `/${c.name}`).join('`, `')}\``
+                    })
+                    .setFooter({ text: "Nachos Marketplace • Command Sync Engine" })
+                    .setTimestamp();
+
+                if (statusMsg) {
+                    await statusMsg.edit({ content: null, embeds: [embed] }).catch(() => {});
+                } else {
+                    await message.reply({ embeds: [embed] }).catch(() => {});
+                }
+            } catch (err) {
+                console.error("[!sync Error]:", err);
+                if (statusMsg) {
+                    await statusMsg.edit({ content: `❌ Failed to sync commands: \`${err.message}\`` }).catch(() => {});
+                }
+            } finally {
+                activeSyncOperations.delete(lockKey);
+            }
+        }
+    } catch (err) {
+        console.error("Error in messageCreate:", err);
+    }
+});
+
 // ─── Initialization deployment ───────────────────────────────────────────────
 client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
 
     try {
-        const commandsToDeploy = [
-                {
-                    name: 'lock',
-                    description: 'Lock the current channel',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageChannels
-                },
-                {
-                    name: 'unlock',
-                    description: 'Unlock the current channel',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageChannels
-                },
-                {
-                    name: 'add',
-                    description: 'Add a user to the current ticket',
-                    options: [
-                        {
-                            name: 'user',
-                            description: 'The user to add to the ticket',
-                            type: ApplicationCommandOptionType.User,
-                            required: true
-                        }
-                    ]
-                },
-                {
-                    name: 'panel',
-                    description: 'Send the Nachos Marketplace ticket panel',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageGuild
-                },
-                {
-                    name: 'middleman-request',
-                    description: 'Send the Middleman Request panel',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageGuild
-                },
-                {
-                    name: 'close',
-                    description: 'Close the current ticket channel',
-                },
-                {
-                    name: 'restock_setup',
-                    description: 'Set up a restock notification role panel',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageGuild,
-                    options: [
-                        {
-                            name: 'role',
-                            description: 'The role to give users',
-                            type: ApplicationCommandOptionType.Role,
-                            required: true
-                        },
-                        {
-                            name: 'emoji',
-                            description: 'The emoji to display on the message and button',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        }
-                    ]
-                },
-                {
-                    name: 'questioner',
-                    description: 'Start a guessing game',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageGuild,
-                    options: [
-                        {
-                            name: 'question',
-                            description: 'The question people have to answer',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'answer',
-                            description: 'The correct answer',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'channel',
-                            description: 'The channel where the game will be posted',
-                            type: ApplicationCommandOptionType.Channel,
-                            channelTypes: [ChannelType.GuildText],
-                            required: true
-                        },
-                        {
-                            name: 'title',
-                            description: 'The title of the question/game',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'attachment',
-                            description: 'Optional image/file attachment',
-                            type: ApplicationCommandOptionType.Attachment,
-                            required: false
-                        }
-                    ]
-                },
-                {
-                    name: 'poll',
-                    description: 'Create a poll with up to 5 options',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageMessages,
-                    options: [
-                        {
-                            name: 'question',
-                            description: 'The question for the poll',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'option_1',
-                            description: 'First option',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'option_2',
-                            description: 'Second option',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'option_3',
-                            description: 'Third option',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'option_4',
-                            description: 'Fourth option',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'option_5',
-                            description: 'Fifth option',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'thumbnail',
-                            description: 'Optional image to show as a thumbnail',
-                            type: ApplicationCommandOptionType.Attachment,
-                            required: false
-                        }
-                    ]
-                },
-                {
-                    name: 'setupautodelete',
-                    description: 'Setup automatic recurring channel purge (deletes messages, does not delete channel)',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageChannels,
-                    options: [
-                        {
-                            name: 'interval',
-                            description: 'Interval in minutes to auto-delete messages',
-                            type: ApplicationCommandOptionType.Integer,
-                            required: true,
-                            minValue: 1
-                        },
-                        {
-                            name: 'logo',
-                            description: 'Optional image or GIF for the thumbnail',
-                            type: ApplicationCommandOptionType.Attachment,
-                            required: false
-                        }
-                    ]
-                },
-                {
-                    name: 'embed',
-                    description: 'Create a highly-customizable aesthetic embed message',
-                    defaultMemberPermissions: PermissionFlagsBits.ManageMessages, // Only staff with Manage Messages should use this
-                    options: [
-                        {
-                            name: 'message',
-                            description: 'The main text inside the embed (use \\n for line breaks)',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'color',
-                            description: 'Hex color code for the sidebar (e.g. #FF0000)',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        },
-                        {
-                            name: 'title',
-                            description: 'Optional title text',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'footer',
-                            description: 'Optional footer text',
-                            type: ApplicationCommandOptionType.String,
-                            required: false
-                        },
-                        {
-                            name: 'attachment',
-                            description: 'Optional image attachment for the embed',
-                            type: ApplicationCommandOptionType.Attachment,
-                            required: false
-                        }
-                    ]
-                },
-                {
-                    name: 'massdm',
-                    description: 'DM all members with a specific role (Admin only)',
-                    options: [
-                        {
-                            name: 'role',
-                            description: 'The role whose members will receive the message',
-                            type: ApplicationCommandOptionType.Role,
-                            required: true
-                        },
-                        {
-                            name: 'message',
-                            description: 'The message to send to the members',
-                            type: ApplicationCommandOptionType.String,
-                            required: true
-                        }
-                    ]
-                }
-        ];
+        const commandsToDeploy = getCommandsToDeploy();
 
         // Deploy slash commands:
         // 1. First deploy to all joined guilds directly
@@ -1324,11 +1490,9 @@ client.once('ready', async () => {
 client.on('guildCreate', async (guild) => {
     try {
         console.log(`🎉 Joined new guild: "${guild.name}" (${guild.id}). Syncing slash commands...`);
-        const commands = await client.application.commands.fetch();
-        if (commands && commands.size > 0) {
-            await guild.commands.set(commands.map(cmd => cmd));
-            console.log(`✅ Slash commands deployed immediately to newly joined guild "${guild.name}"`);
-        }
+        const commandsToDeploy = getCommandsToDeploy();
+        await guild.commands.set(commandsToDeploy);
+        console.log(`✅ Slash commands deployed immediately to newly joined guild "${guild.name}"`);
     } catch (err) {
         console.warn(`⚠️ Failed registering commands on new guild join for ${guild.id}:`, err.message);
     }
